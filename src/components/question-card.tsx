@@ -5,6 +5,7 @@ import { memo, useEffect, useRef, useState } from "react";
 
 import { AnswerSection } from "@/components/answer-section";
 import { getAnonId } from "@/lib/anon-id";
+import { addDisliked, hasDisliked } from "@/lib/disliked-store";
 import { addLiked, hasLiked } from "@/lib/liked-store";
 import { supabase } from "@/lib/supabase";
 import { cn } from "@/lib/utils";
@@ -28,6 +29,7 @@ const PARTICLES = Array.from({ length: 12 }, (_, i) => {
 function QuestionCardImpl({ question }: Props) {
   const [pending, setPending] = useState(false);
   const [alreadyLiked, setAlreadyLiked] = useState(false);
+  const [alreadyDisliked, setAlreadyDisliked] = useState(false);
   const [burstKey, setBurstKey] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const isHot = question.likes >= 5;
@@ -41,6 +43,7 @@ function QuestionCardImpl({ question }: Props) {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setAlreadyLiked(hasLiked(question.id));
+    setAlreadyDisliked(hasDisliked(question.id));
   }, [question.id]);
 
   useEffect(() => {
@@ -89,6 +92,23 @@ function QuestionCardImpl({ question }: Props) {
     addLiked(question.id);
     setAlreadyLiked(true);
     setBurstKey((k) => k + 1);
+  }
+
+  async function handleDislike() {
+    if (pending || alreadyDisliked) return;
+    setPending(true);
+    // 走 RPC：DB 端 SECURITY DEFINER 函式內原子地寫 question_dislikes 去重 + bump dislikes
+    const { error } = await supabase.rpc("increment_question_dislike", {
+      qid: question.id,
+      anon: getAnonId(),
+    });
+    setPending(false);
+    if (error) {
+      console.error("不喜歡失敗", error);
+      return;
+    }
+    addDisliked(question.id);
+    setAlreadyDisliked(true);
   }
 
   return (
@@ -249,6 +269,36 @@ function QuestionCardImpl({ question }: Props) {
                 </motion.span>
               </span>
             </motion.button>
+
+            <motion.button
+              type="button"
+              onClick={handleDislike}
+              disabled={pending || alreadyDisliked}
+              whileTap={alreadyDisliked ? undefined : { scale: 0.92 }}
+              className={cn(
+                "inline-flex min-h-11 items-center gap-1.5 rounded-full px-4 py-2",
+                "text-sm font-medium transition-colors duration-200",
+                "border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
+                alreadyDisliked
+                  ? "border-border/60 bg-muted/60 text-muted-foreground cursor-not-allowed"
+                  : "border-border bg-card hover:border-red-600/60 hover:bg-red-600/10 hover:text-red-600",
+                pending && "opacity-60"
+              )}
+            >
+              <span aria-hidden>{alreadyDisliked ? "✓" : "👎"}</span>
+              <span>
+                {alreadyDisliked ? "已不喜歡" : "不喜歡"} ·{" "}
+                <motion.span
+                  key={question.dislikes}
+                  initial={{ y: -6, opacity: 0 }}
+                  animate={{ y: 0, opacity: 1 }}
+                  transition={{ duration: 0.25 }}
+                  className="inline-block tabular-nums"
+                >
+                  {question.dislikes}
+                </motion.span>
+              </span>
+            </motion.button>
           </div>
         </div>
 
@@ -273,12 +323,13 @@ function QuestionCardImpl({ question }: Props) {
   );
 }
 
-// React.memo：只比對 id / likes / content，
+// React.memo：只比對 id / likes / dislikes / content，
 // 父層 state 變動（mouse spotlight、count-up tick）不會引發 re-render
 export const QuestionCard = memo(QuestionCardImpl, (prev, next) => {
   return (
     prev.question.id === next.question.id &&
     prev.question.likes === next.question.likes &&
+    prev.question.dislikes === next.question.dislikes &&
     prev.question.content === next.question.content &&
     prev.question.created_at === next.question.created_at
   );
